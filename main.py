@@ -1,19 +1,16 @@
+import argparse
 import copy
 import csv
-import os
+from pathlib import Path
 
 import ale_py
 import gymnasium as gym
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 gym.register_envs(ale_py)
 
-
-# ---------------------------------------------------------
-# CONFIGURAÇÕES
-# ---------------------------------------------------------
 ENV_ID = "ALE/Freeway-v5"
 TAMANHO_POPULACAO = 20
 NUM_GERACOES = 30
@@ -23,19 +20,15 @@ NUM_ACOES = 3
 TAXA_MUTACAO = 0.10
 INTENSIDADE_MUTACAO = 0.20
 NUM_ELITE = 2
+PASTA_RESULTADOS = Path(__file__).resolve().parent / "resultados"
 
 
 def criar_ambiente(render_mode=None):
-	return gym.make(
-		ENV_ID,
-		obs_type="ram",
-		render_mode=render_mode,
-	)
+	return gym.make(ENV_ID, obs_type="ram", render_mode=render_mode)
 
 
 class Agente:
 	def __init__(self):
-		# Cada indivíduo começa com parâmetros diferentes.
 		self.W1 = np.random.randn(NUM_ENTRADAS, NUM_OCULTOS)
 		self.b1 = np.random.randn(NUM_OCULTOS)
 		self.W2 = np.random.randn(NUM_OCULTOS, NUM_ACOES)
@@ -43,122 +36,120 @@ class Agente:
 		self.fitness = 0.0
 
 	def agir(self, estado):
-		# RAM: valores inteiros entre 0 e 255.
 		estado = estado.astype(np.float32) / 255.0
-		oculto = np.tanh(estado @ self.W1 + self.b1)
-		saida = oculto @ self.W2 + self.b2
-		# A maior saída define a ação escolhida.
+		saida_oculta = np.tanh(estado @ self.W1 + self.b1)
+		saida = saida_oculta @ self.W2 + self.b2
 		return int(np.argmax(saida))
 
 
-def avaliar(agente):
-	# Cria o ambiente e recebe o estado inicial do episódio.
+def avaliar(agente, render_mode=None):
+	env = criar_ambiente(render_mode)
+	try:
+		estado, informacoes = env.reset()
+		fitness = 0.0
+		terminado = False
+		truncado = False
+
+		while not terminado and not truncado:
+			action = agente.agir(estado)
+			estado, reward, terminado, truncado, informacoes = env.step(action)
+			fitness += reward
+
+		return float(fitness)
+	finally:
+		env.close()
+
+
+def avaliar_aleatorio():
 	env = criar_ambiente()
-	espaco_acoes = env.action_space
-	estado, informacoes = env.reset()
-	fitness = 0.0
-	terminado = False
-	truncado = False
+	try:
+		estado, informacoes = env.reset()
+		fitness = 0.0
+		terminado = False
+		truncado = False
 
-	# O episódio termina quando terminated ou truncated for True.
-	while not terminado and not truncado:
-		action = agente.agir(estado)
-		estado, reward, terminado, truncado, informacoes = env.step(action)
-		fitness = fitness + reward
+		while not terminado and not truncado:
+			action = env.action_space.sample()
+			estado, reward, terminado, truncado, informacoes = env.step(action)
+			fitness += reward
 
-	env.close()
-	return fitness
+		return float(fitness)
+	finally:
+		env.close()
 
 
 def criar_populacao():
-	populacao = []
-
-	for indice in range(TAMANHO_POPULACAO):
-		populacao.append(Agente())
-
-	return populacao
-
-
-def obter_fitness(agente):
-	return agente.fitness
+	return [Agente() for indice in range(TAMANHO_POPULACAO)]
 
 
 def selecionar(populacao):
-	# Ordena do maior para o menor fitness.
-	populacao_ordenada = sorted(
-		populacao,
-		key=obter_fitness,
-		reverse=True,
-	)
-
-	quantidade_pais = len(populacao_ordenada) // 2
-	if quantidade_pais < 1:
-		quantidade_pais = 1
-
+	populacao_ordenada = sorted(populacao, key=lambda agente: agente.fitness, reverse=True)
+	quantidade_pais = max(1, len(populacao_ordenada) // 2)
 	return populacao_ordenada[:quantidade_pais]
 
 
-def mutar(agente):
-	# Cada posição sorteada recebe uma pequena alteração aleatória.
-	mascara_W1 = np.random.rand(*agente.W1.shape) < TAXA_MUTACAO
-	mascara_b1 = np.random.rand(*agente.b1.shape) < TAXA_MUTACAO
-	mascara_W2 = np.random.rand(*agente.W2.shape) < TAXA_MUTACAO
-	mascara_b2 = np.random.rand(*agente.b2.shape) < TAXA_MUTACAO
-
-	agente.W1 += mascara_W1 * np.random.randn(*agente.W1.shape) * INTENSIDADE_MUTACAO
-	agente.b1 += mascara_b1 * np.random.randn(*agente.b1.shape) * INTENSIDADE_MUTACAO
-	agente.W2 += mascara_W2 * np.random.randn(*agente.W2.shape) * INTENSIDADE_MUTACAO
-	agente.b2 += mascara_b2 * np.random.randn(*agente.b2.shape) * INTENSIDADE_MUTACAO
+def mutar(agente, taxa_mutacao=TAXA_MUTACAO, intensidade_mutacao=INTENSIDADE_MUTACAO):
+	for parametro in (agente.W1, agente.b1, agente.W2, agente.b2):
+		mascara = np.random.rand(*parametro.shape) < taxa_mutacao
+		parametro += mascara * np.random.randn(*parametro.shape) * intensidade_mutacao
 
 
-def nova_geracao(populacao):
-	# Seleciona os melhores indivíduos para serem pais.
+def nova_geracao(populacao, taxa_mutacao=TAXA_MUTACAO, intensidade_mutacao=INTENSIDADE_MUTACAO):
 	selecionados = selecionar(populacao)
-	populacao_ordenada = sorted(
-		populacao,
-		key=obter_fitness,
-		reverse=True,
-	)
+	populacao_ordenada = sorted(populacao, key=lambda agente: agente.fitness, reverse=True)
+	nova_populacao = [copy.deepcopy(agente) for agente in populacao_ordenada[:NUM_ELITE]]
 
-	nova_populacao = []
-
-	# O elitismo preserva os melhores sem mutação.
-	for indice in range(NUM_ELITE):
-		elite = copy.deepcopy(populacao_ordenada[indice])
-		nova_populacao.append(elite)
-
-	# Completa a população com cópias mutadas dos pais selecionados.
 	while len(nova_populacao) < TAMANHO_POPULACAO:
-		indice_pai = np.random.randint(0, len(selecionados))
-		filho = copy.deepcopy(selecionados[indice_pai])
-		mutar(filho)
+		pai = selecionados[np.random.randint(0, len(selecionados))]
+		filho = copy.deepcopy(pai)
+		mutar(filho, taxa_mutacao, intensidade_mutacao)
 		nova_populacao.append(filho)
 
 	return nova_populacao
 
 
-def salvar_historico(historico):
-	os.makedirs("resultados", exist_ok=True)
+def evoluir(taxa_mutacao=TAXA_MUTACAO, intensidade_mutacao=INTENSIDADE_MUTACAO):
+	populacao = criar_populacao()
+	historico = []
 
-	with open("resultados/fitness.csv", "w", newline="", encoding="utf-8") as arquivo:
-		escritor = csv.DictWriter(
-			arquivo,
-			fieldnames=["geracao", "melhor", "media", "pior"],
+	for geracao in range(NUM_GERACOES):
+		for agente in populacao:
+			agente.fitness = avaliar(agente)
+
+		valores = [agente.fitness for agente in populacao]
+		registro = {
+			"geracao": geracao,
+			"melhor": max(valores),
+			"media": float(np.mean(valores)),
+			"pior": min(valores),
+		}
+		historico.append(registro)
+		print(
+			f"Geração {geracao:03d} | "
+			f"Melhor: {registro['melhor']:.2f} | "
+			f"Média: {registro['media']:.2f} | "
+			f"Pior: {registro['pior']:.2f}"
 		)
+		melhor_agente = copy.deepcopy(max(populacao, key=lambda agente: agente.fitness))
+		populacao = nova_geracao(populacao, taxa_mutacao, intensidade_mutacao)
+
+	return historico, melhor_agente
+
+
+def salvar_historico(historico, nome_arquivo="fitness.csv"):
+	PASTA_RESULTADOS.mkdir(exist_ok=True)
+	with (PASTA_RESULTADOS / nome_arquivo).open("w", newline="", encoding="utf-8") as arquivo:
+		escritor = csv.DictWriter(arquivo, fieldnames=["geracao", "melhor", "media", "pior"])
 		escritor.writeheader()
 		escritor.writerows(historico)
 
 
-def gerar_grafico(historico):
-	geracoes = []
-	melhores = []
-	medias = []
+def gerar_grafico(historico, nome_arquivo="fitness.png"):
+	geracoes = [registro["geracao"] for registro in historico]
+	melhores = [registro["melhor"] for registro in historico]
+	medias = [registro["media"] for registro in historico]
 
-	for registro in historico:
-		geracoes.append(registro["geracao"])
-		melhores.append(registro["melhor"])
-		medias.append(registro["media"])
-
+	plt.figure()
 	plt.plot(geracoes, melhores, label="Melhor fitness")
 	plt.plot(geracoes, medias, label="Fitness médio")
 	plt.xlabel("Geração")
@@ -166,41 +157,45 @@ def gerar_grafico(historico):
 	plt.title("Evolução do agente no Freeway")
 	plt.legend()
 	plt.grid(True)
-	plt.savefig("resultados/fitness.png")
+	plt.tight_layout()
+	PASTA_RESULTADOS.mkdir(exist_ok=True)
+	plt.savefig(PASTA_RESULTADOS / nome_arquivo)
 	plt.close()
 
 
-populacao = criar_populacao()
-historico = []
+def executar_experimentos():
+	experimentos = {
+		"experimento_a": (0.01, 0.05),
+		"experimento_b": (0.10, 0.20),
+		"experimento_c": (0.40, 0.50),
+	}
+	for nome, (taxa, intensidade) in experimentos.items():
+		print(f"\n{nome}: taxa={taxa:.2f}, intensidade={intensidade:.2f}")
+		historico, melhor_agente = evoluir(taxa, intensidade)
+		salvar_historico(historico, f"{nome}.csv")
+		gerar_grafico(historico, f"{nome}.png")
 
 
-for geracao in range(NUM_GERACOES):
-	# Avaliar TODOS os indivíduos da geração.
-	for agente in populacao:
-		agente.fitness = avaliar(agente)
+def main():
+	parser = argparse.ArgumentParser(description="Neuroevolução aplicada ao Atari Freeway.")
+	parser.add_argument("--experimentos", action="store_true", help="Executa A, B e C.")
+	parser.add_argument("--renderizar", action="store_true", help="Renderiza o melhor agente.")
+	args = parser.parse_args()
 
-	valores = [agente.fitness for agente in populacao]
-	melhor = max(valores)
-	media = float(np.mean(valores))
-	pior = min(valores)
-	historico.append(
-		{
-			"geracao": geracao,
-			"melhor": melhor,
-			"media": media,
-			"pior": pior,
-		}
-	)
-	print(
-		f"Geração {geracao:03d} | "
-		f"Melhor: {melhor:.2f} | "
-		f"Média: {media:.2f} | "
-		f"Pior: {pior:.2f}"
-	)
+	baseline = avaliar_aleatorio()
+	print(f"Baseline aleatório | Fitness: {baseline:.2f}")
 
-	# Produzir a próxima geração.
-	populacao = nova_geracao(populacao)
+	if args.experimentos:
+		executar_experimentos()
+		return
+
+	historico, melhor_agente = evoluir()
+	salvar_historico(historico)
+	gerar_grafico(historico)
+	print(f"Melhor agente evoluído | Fitness: {melhor_agente.fitness:.2f}")
+	if args.renderizar:
+		print(f"Melhor agente renderizado | Fitness: {avaliar(melhor_agente, 'human'):.2f}")
 
 
-salvar_historico(historico)
-gerar_grafico(historico)
+if __name__ == "__main__":
+	main()
